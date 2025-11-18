@@ -1,0 +1,102 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <dirent.h>
+#include <sys/stat.h>
+#include <time.h>
+#include <string.h>
+#include <errno.h>
+#include <limits.h>  // for PATH_MAX
+#include <ctype.h>
+
+static int has_txt_extension(const char *name) {
+    size_t len = strlen(name);
+    if (len < 4) return 0;
+    const char *ext = name + len - 4;
+    if (ext[0] != '.') return 0;
+    return (tolower((unsigned char)ext[1]) == 't' &&
+            tolower((unsigned char)ext[2]) == 'x' &&
+            tolower((unsigned char)ext[3]) == 't');
+}
+
+int main(int argc, char *argv[]) {
+    if (argc != 2) {
+        fprintf(stderr, "Usage: %s <directory_path>\n", argv[0]);
+        return EXIT_FAILURE;
+    }
+
+    const char *dirpath = argv[1];
+    DIR *dir = opendir(dirpath);
+    if (!dir) {
+        fprintf(stderr, "Error opening directory '%s': %s\n", dirpath, strerror(errno));
+        return EXIT_FAILURE;
+    }
+
+    struct dirent *entry;
+    struct stat fileStat;
+    char filepath[PATH_MAX];
+    unsigned int txtCount = 0;
+    unsigned long long txtTotalSize = 0ULL;
+
+    // Track largest regular file (any extension)
+    char *largest_name = NULL;
+    unsigned long long largest_size = 0ULL;
+
+    printf("Listing .txt files in directory: %s\n\n", dirpath);
+
+    while ((entry = readdir(dir)) != NULL) {
+        if (strcmp(entry->d_name, ".") == 0  strcmp(entry->d_name, "..") == 0)
+            continue;
+
+        int ret = snprintf(filepath, sizeof(filepath), "%s/%s", dirpath, entry->d_name);
+        if (ret < 0  (size_t)ret >= sizeof(filepath)) {
+            fprintf(stderr, "Path too long: %s/%s\n", dirpath, entry->d_name);
+            continue;
+        }
+
+        if (stat(filepath, &fileStat) == -1) {
+            fprintf(stderr, "Cannot stat file %s: %s\n", filepath, strerror(errno));
+            continue;
+        }
+
+        if (S_ISREG(fileStat.st_mode)) {
+            // update largest file tracking (all regular files)
+            unsigned long long fsize = (unsigned long long) fileStat.st_size;
+            if (largest_name == NULL || fsize > largest_size) {
+                free(largest_name);
+                largest_name = strdup(entry->d_name);
+                if (largest_name) largest_size = fsize;
+            }
+
+            // If it's a .txt file, list and count it
+            if (has_txt_extension(entry->d_name)) {
+                char modTime[64] = "unknown";
+                struct tm *tm_info = localtime(&fileStat.st_mtime);
+                if (tm_info) {
+                    if (strftime(modTime, sizeof(modTime), "%Y-%m-%d %H:%M:%S", tm_info) == 0)
+                        strncpy(modTime, "unknown", sizeof(modTime));
+                }
+
+                printf("File: %s\n", entry->d_name);
+                printf("Size: %llu bytes\n", (unsigned long long)fileStat.st_size);
+                printf("Last Modified: %s\n\n", modTime);
+
+                txtCount++;
+                txtTotalSize += fsize;
+            }
+        }
+    }
+
+    closedir(dir);
+
+    printf("Total .txt files: %u\n", txtCount);
+    printf("Total cumulative size of .txt files: %llu bytes\n", txtTotalSize);
+
+    if (largest_name) {
+        printf("Largest regular file: %s (%llu bytes)\n", largest_name, largest_size);
+        free(largest_name);
+    } else {
+        printf("No regular files found in directory.\n");
+    }
+
+    return EXIT_SUCCESS;
+}
