@@ -40,18 +40,17 @@ int main(int argc, char *argv[]) {
     // Track largest regular file (any extension)
     char *largest_name = NULL;
     unsigned long long largest_size = 0ULL;
-
     printf("Listing .txt files in directory: %s\n\n", dirpath);
 
     while ((entry = readdir(dir)) != NULL) {
-        if (strcmp(entry->d_name, ".") == 0  strcmp(entry->d_name, "..") == 0)
-            continue;
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
+    	continue;
 
         int ret = snprintf(filepath, sizeof(filepath), "%s/%s", dirpath, entry->d_name);
-        if (ret < 0  (size_t)ret >= sizeof(filepath)) {
-            fprintf(stderr, "Path too long: %s/%s\n", dirpath, entry->d_name);
-            continue;
-        }
+        if (ret < 0 || (size_t)ret >= sizeof(filepath)) {
+    	    fprintf(stderr, "Path too long: %s/%s\n", dirpath, entry->d_name);
+    	    continue;
+	}
 
         if (stat(filepath, &fileStat) == -1) {
             fprintf(stderr, "Cannot stat file %s: %s\n", filepath, strerror(errno));
@@ -79,7 +78,6 @@ int main(int argc, char *argv[]) {
                 printf("File: %s\n", entry->d_name);
                 printf("Size: %llu bytes\n", (unsigned long long)fileStat.st_size);
                 printf("Last Modified: %s\n\n", modTime);
-
                 txtCount++;
                 txtTotalSize += fsize;
             }
