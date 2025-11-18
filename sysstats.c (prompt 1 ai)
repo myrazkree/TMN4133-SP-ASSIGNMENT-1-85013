@@ -1,0 +1,165 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <dirent.h>
+#include <sys/stat.h>
+#include <time.h>
+#include <string.h>
+#include <errno.h>
+#include <limits.h>
+#include <inttypes.h>
+
+#ifdef _WIN32
+#define DIR_SEP '\\'
+#else
+#define DIR_SEP '/'
+#endif
+
+static char *join_path(const char *dir, const char *name) {
+    size_t len = strlen(dir);
+    size_t nlen = strlen(name);
+    int need_sep = (len > 0 && dir[len - 1] != DIR_SEP);
+    size_t total = len + (need_sep ? 1 : 0) + nlen + 1;
+    char *p = malloc(total);
+    if (!p) return NULL;
+    if (need_sep)
+        snprintf(p, total, "%s%c%s", dir, DIR_SEP, name);
+    else
+        snprintf(p, total, "%s%s", dir, name);
+    return p;
+}
+
+static const char *file_type_string(mode_t m) {
+    if (S_ISREG(m)) return "regular file";
+    if (S_ISDIR(m)) return "directory";
+    if (S_ISLNK(m)) return "symlink";
+    if (S_ISCHR(m)) return "char device";
+    if (S_ISBLK(m)) return "block device";
+    if (S_ISFIFO(m)) return "FIFO/pipe";
+    if (S_ISSOCK(m)) return "socket";
+    return "unknown";
+}
+
+static void human_readable(uintmax_t size, char *buf, size_t bufsz) {
+    const char *units[] = {"B","KB","MB","GB","TB","PB"};
+    size_t i = 0;
+    double s = (double)size;
+    while (s >= 1024.0 && i < (sizeof(units)/sizeof(units[0]))-1) {
+        s /= 1024.0;
+        i++;
+    }
+    snprintf(buf, bufsz, "%.2f %s", s, units[i]);
+}
+
+int compare_names(const void *a, const void *b) {
+    const char * const *pa = a;
+    const char * const *pb = b;
+    return strcmp(*pa, *pb);
+}
+
+int main(int argc, char *argv[]) {
+    if (argc != 2) {
+        fprintf(stderr, "Usage: %s <directory_path>\n", argv[0]);
+        return EXIT_FAILURE;
+    }
+
+    const char *dirpath = argv[1];
+    DIR *dir = opendir(dirpath);
+    if (!dir) {
+        fprintf(stderr, "Error opening directory '%s': %s\n", dirpath, strerror(errno));
+        return EXIT_FAILURE;
+    }
+
+    struct dirent *entry;
+    char **names = NULL;
+    size_t names_cap = 0;
+    size_t names_count = 0;
+
+    // Collect names first
+    while ((entry = readdir(dir)) != NULL) {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
+            continue;
+        if (names_count + 1 > names_cap) {
+            size_t newcap = names_cap ? names_cap * 2 : 64;
+            char **tmp = realloc(names, newcap * sizeof(char*));
+            if (!tmp) {
+                fprintf(stderr, "Out of memory\n");
+                closedir(dir);
+                for (size_t i = 0; i < names_count; ++i) free(names[i]);
+                free(names);
+                return EXIT_FAILURE;
+            }
+            names = tmp;
+            names_cap = newcap;
+        }
+        names[names_count] = strdup(entry->d_name);
+        if (!names[names_count]) {
+            fprintf(stderr, "Out of memory\n");
+            closedir(dir);
+            for (size_t i = 0; i < names_count; ++i) free(names[i]);
+            free(names);
+            return EXIT_FAILURE;
+        }
+        names_count++;
+    }
+    closedir(dir);
+
+    // Sort for deterministic output
+    qsort(names, names_count, sizeof(char*), compare_names);
+
+    printf("Listing files in directory: %s\n\n", dirpath);
+
+    unsigned int fileCount = 0;
+    unsigned long long totalSize = 0ULL;
+
+    for (size_t i = 0; i < names_count; ++i) {
+        char *path = join_path(dirpath, names[i]);
+        if (!path) {
+            fprintf(stderr, "Path allocation failed for %s\n", names[i]);
+            free(names[i]);
+            continue;
+        }
+
+        struct stat st;
+        if (stat(path, &st) == -1) {
+            fprintf(stderr, "Cannot stat '%s': %s\n", path, strerror(errno));
+            free(path);
+            free(names[i]);
+            continue;
+        }
+// Time formatting (thread-safe if available)
+        char modTime[64] = "unknown";
+    #if defined(_POSIX_THREAD_SAFE_FUNCTIONS) && !defined(APPLE)
+        struct tm tmbuf;
+        if (localtime_r(&st.st_mtime, &tmbuf) != NULL) {
+            strftime(modTime, sizeof(modTime), "%Y-%m-%d %H:%M:%S", &tmbuf);
+        }
+    #else
+        struct tm *tm_info = localtime(&st.st_mtime);
+        if (tm_info)
+            strftime(modTime, sizeof(modTime), "%Y-%m-%d %H:%M:%S", tm_info);
+    #endif
+
+        char hrsize[32];
+        human_readable((uintmax_t)st.st_size, hrsize, sizeof(hrsize));
+
+        printf("Name: %s\n", names[i]);
+        printf("Type: %s\n", file_type_string(st.st_mode));
+        printf("Size: %llu bytes (%s)\n", (unsigned long long)st.st_size, hrsize);
+        printf("Last Modified: %s\n\n", modTime);
+
+        if (S_ISREG(st.st_mode)) {
+            fileCount++;
+            totalSize += (unsigned long long)st.st_size;
+        }
+
+        free(path);
+        free(names[i]);
+    }
+
+    free(names);
+
+    printf("Total regular files: %u\n", fileCount);
+    printf("Total cumulative size: %llu bytes\n", totalSize);
+
+    return EXIT_SUCCESS;
+}
