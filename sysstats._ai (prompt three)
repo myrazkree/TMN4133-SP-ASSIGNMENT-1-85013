@@ -1,0 +1,143 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <dirent.h>
+#include <sys/stat.h>
+#include <time.h>
+#include <string.h>
+#include <errno.h>
+#include <limits.h>  // for PATH_MAX
+#include <unistd.h>  // for readlink
+#include <sys/types.h>
+#include <stdint.h>
+
+/* Join dir + "/" + name into a malloc'd buffer.
+   Caller must free() the returned pointer.
+   Returns NULL on allocation/overflow error. */
+static char *join_path_alloc(const char *dir, const char *name) {
+    size_t ld = strlen(dir);
+    size_t ln = strlen(name);
+    /* guard overflow: ld + 1 + ln + 1 */
+    if (ld > SIZE_MAX - ln - 2) return NULL;
+    size_t need = ld + 1 + ln + 1;
+    char *p = malloc(need);
+    if (!p) return NULL;
+    if (ld > 0 && (dir[ld-1] == '/'  dir[ld-1] == '\\'))
+        snprintf(p, need, "%s%s", dir, name);
+    else
+        snprintf(p, need, "%s/%s", dir, name);
+    return p;
+}
+
+/* Read symlink target into a malloc'd nul-terminated buffer.
+   Returns buffer on success (caller free), NULL if not a symlink or on error. */
+static char *read_symlink_target_alloc(const char *path) {
+    ssize_t r;
+    size_t buf = 128;
+    char *t = NULL;
+
+    while (1) {
+        char *tmp = realloc(t, buf + 1);
+        if (!tmp) { free(t); return NULL; }
+        t = tmp;
+        r = readlink(path, t, buf);
+        if (r < 0) { free(t); return NULL; }           /* not a symlink or error */
+        if ((size_t)r <= buf) { t[r] = '\0'; return t; }
+        /* need larger buffer */
+        buf *= 2;
+    }
+}
+
+int main(int argc, char *argv[]) {
+    if (argc != 2) {
+        fprintf(stderr, "Usage: %s <directory_path>\n", argv[0]);
+        return EXIT_FAILURE;
+    }
+
+    const char *dirpath = argv[1];
+    DIR *dir = opendir(dirpath);
+    if (!dir) {
+        fprintf(stderr, "Error opening directory '%s': %s\n", dirpath, strerror(errno));
+        return EXIT_FAILURE;
+    }
+
+    struct dirent *entry;
+    struct stat fileStat;
+    unsigned int fileCount = 0;
+    unsigned long long totalSize = 0;
+
+    printf("Listing files in directory: %s\n\n", dirpath);
+    while ((entry = readdir(dir)) != NULL) {
+        /* Skip "." and ".." */
+        if (strcmp(entry->d_name, ".") == 0  strcmp(entry->d_name, "..") == 0)
+            continue;
+
+        /* Build full path dynamically to avoid PATH_MAX limits */
+        char *filepath = join_path_alloc(dirpath, entry->d_name);
+        if (!filepath) {
+            fprintf(stderr, "Path allocation failed for %s/%s\n", dirpath, entry->d_name);
+            continue;
+        }
+
+        /* Use lstat so we can detect symlinks without following them immediately */
+        if (lstat(filepath, &fileStat) == -1) {
+            fprintf(stderr, "Cannot lstat %s: %s\n", filepath, strerror(errno));
+            free(filepath);
+            continue;
+        }
+
+        /* If it's a symlink, read and print the target safely */
+        if (S_ISLNK(fileStat.st_mode)) {
+            char *target = read_symlink_target_alloc(filepath);
+            if (target) {
+                printf("File: %s -> %s [symlink]\n", entry->d_name, target);
+                free(target);
+            } else {
+                printf("File: %s [symlink] (target unreadable)\n", entry->d_name);
+            }
+
+            /* Optionally, if you want to include the target's size/stat, try stat() */
+            struct stat targetStat;
+            if (stat(filepath, &targetStat) == 0 && S_ISREG(targetStat.st_mode)) {
+                /* show resolved target's size/time (not required) */
+                char modTime[64] = "unknown";
+                struct tm *tm_info = localtime(&targetStat.st_mtime);
+                if (tm_info) strftime(modTime, sizeof(modTime), "%Y-%m-%d %H:%M:%S", tm_info);
+                printf("Resolved target size: %lld bytes\n", (long long)targetStat.st_size);
+                printf("Resolved target last modified: %s\n\n", modTime);
+
+                fileCount++;
+                totalSize += (unsigned long long)targetStat.st_size;
+            } else {
+                printf("\n");
+            }
+            
+            free(filepath);
+            continue;
+        }
+
+        /* Non-symlink path: format last modification time safely */
+        char modTime[64] = "unknown";
+        struct tm *tm_info = localtime(&fileStat.st_mtime);
+        if (tm_info) strftime(modTime, sizeof(modTime), "%Y-%m-%d %H:%M:%S", tm_info);
+
+        printf("File: %s\n", entry->d_name);
+        printf("Size: %lld bytes\n", (long long)fileStat.st_size);
+        printf("Last Modified: %s\n\n", modTime);
+
+        /* Count only regular files */
+        if (S_ISREG(fileStat.st_mode)) {
+            fileCount++;
+            totalSize += (unsigned long long)fileStat.st_size;
+        }
+
+        free(filepath);
+    }
+
+    closedir(dir);
+
+    /* Display totals */
+    printf("Total files: %u\n", fileCount);
+    printf("Total cumulative size: %llu bytes\n", totalSize);
+
+    return EXIT_SUCCESS;
+}
